@@ -1,15 +1,18 @@
+use std::borrow::BorrowMut;
+use serde::Deserialize;
 // URL we scrap
 // https://github.com/machinefi/Bike-Sharing-DePIN-Webinar
 // URL we have to GET request
 // https://raw.githubusercontent.com/machinefi/Bike-Sharing-DePIN-Webinar/main/README.md
-use git2::{Repository, Oid, Diff};
+use git2::{Diff, Oid, Repository};
+use toml::Value;
 
 use anyhow::{anyhow, Result};
 use reqwest;
 
 // GitHub repository information
 const OWNER: &str = "electric-capital";
-const REPO: &str  = "crypto-ecosystems";
+const REPO: &str = "crypto-ecosystems";
 
 fn repo_url_to_readme_url(repo_url: &str) -> Vec<String> {
     let last_part = repo_url
@@ -35,8 +38,7 @@ async fn fetch_readme(url: &str) -> Result<String> {
     }
 }
 
-fn get_diff(old_commit_hash: String, new_commit_hash: String) -> Vec<String>  {
-
+fn get_changed_files_raw(old_commit_hash: String, new_commit_hash: String) -> Vec<String> {
     // Create a temporary directory for the cloned repository
     let temp_dir = tempfile::tempdir().expect("Failed to create temporary directory");
 
@@ -78,16 +80,34 @@ fn get_diff(old_commit_hash: String, new_commit_hash: String) -> Vec<String>  {
         Ok(diff) => diff,
         Err(e) => panic!("failed to get diff: {}", e),
     };
-    
-    let deltas = diff.deltas().filter_map(|delta| {
-        delta.new_file().path()
-    }).filter_map(|path| {
-        path.to_str()
-    }).collect::<Vec<&str>>();
 
+    let changed_files: Vec<Vec<u8>> = diff
+        .deltas()
+        .filter_map(|delta| delta.new_file().path())
+        .filter_map(|path| {
+            let binding = match new_commit
+            .tree()
+            .unwrap()
+            .get_path(path) {
+                Ok(value) => value
+                .to_object(&repo)
+                .unwrap()
+                .into_blob()
+                .unwrap(),
+                Err(_) => {
+                    return None
+                }
+            };
+                
+            let content = binding.content();
+            Some(content.to_owned())
+        })
+        .collect();
 
-    deltas.into_iter().map(|x| x.to_owned()).collect::<Vec<String>>()
-    
+    changed_files
+        .into_iter()
+        .map(|x| String::from_utf8_lossy(&x).to_string())
+        .collect()
 }
 
 #[tokio::main]
@@ -102,10 +122,13 @@ async fn main() -> Result<(), reqwest::Error> {
     //     println!("Response: {:?}", response);
     // }
 
-    let old_commit_hash = "f7663fca12311d886fbcd3009e6069b7a697490e".to_string();
+    let old_commit_hash = "49f546f84d51d73eef29c357a4631d856618f7b9".to_string();
     let new_commit_hash = "7acb5d17f258abbb1e7f1e9f2c58a1c2924cd41d".to_string();
-    let diff_files = get_diff(old_commit_hash, new_commit_hash);
+    let changed_files = get_changed_files_raw(old_commit_hash, new_commit_hash);
 
+    let parsed_toml: Value = toml::from_str(&changed_files[0]).expect("Failed to parse TOML");
+
+    println!("file: {}", parsed_toml["title"].as_str().expect("Missing or invalid title"));
 
     Ok(())
 }
