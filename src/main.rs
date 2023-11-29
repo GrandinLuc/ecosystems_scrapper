@@ -1,5 +1,5 @@
-use std::borrow::BorrowMut;
 use serde::Deserialize;
+use std::borrow::BorrowMut;
 // URL we scrap
 // https://github.com/machinefi/Bike-Sharing-DePIN-Webinar
 // URL we have to GET request
@@ -85,20 +85,17 @@ fn get_changed_files_raw(old_commit_hash: String, new_commit_hash: String) -> Ve
         .deltas()
         .filter_map(|delta| delta.new_file().path())
         .filter_map(|path| {
-            let binding = match new_commit
-            .tree()
-            .unwrap()
-            .get_path(path) {
-                Ok(value) => value
-                .to_object(&repo)
-                .unwrap()
-                .into_blob()
-                .unwrap(),
-                Err(_) => {
-                    return None
-                }
+            if path.extension().unwrap() != "toml" {
+                return None;
+            }
+            if !path.starts_with("data/ecosystems") {
+                return None;
+            }
+            let binding = match new_commit.tree().unwrap().get_path(path) {
+                Ok(value) => value.to_object(&repo).unwrap().into_blob().unwrap(),
+                Err(_) => return None,
             };
-                
+
             let content = binding.content();
             Some(content.to_owned())
         })
@@ -122,13 +119,18 @@ async fn main() -> Result<(), reqwest::Error> {
     //     println!("Response: {:?}", response);
     // }
 
-    let old_commit_hash = "49f546f84d51d73eef29c357a4631d856618f7b9".to_string();
-    let new_commit_hash = "7acb5d17f258abbb1e7f1e9f2c58a1c2924cd41d".to_string();
+    let old_commit_hash = "e5935b7c2249ff75851e2d31f79a59791e61d753".to_string();
+    let new_commit_hash = "cd4d6d144e66bd8092433818de0d0f7780c4dfd5".to_string();
     let changed_files = get_changed_files_raw(old_commit_hash, new_commit_hash);
 
     let parsed_toml: Value = toml::from_str(&changed_files[0]).expect("Failed to parse TOML");
 
-    println!("file: {}", parsed_toml["title"].as_str().expect("Missing or invalid title"));
+    println!(
+        "file: {}",
+        parsed_toml["title"]
+            .as_str()
+            .expect("Missing or invalid title")
+    );
 
     Ok(())
 }
