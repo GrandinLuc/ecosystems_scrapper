@@ -1,5 +1,5 @@
 use serde::Deserialize;
-use std::borrow::BorrowMut;
+use std::{borrow::BorrowMut, collections::HashMap};
 // URL we scrap
 // https://github.com/machinefi/Bike-Sharing-DePIN-Webinar
 // URL we have to GET request
@@ -107,6 +107,31 @@ fn get_changed_files_raw(old_commit_hash: String, new_commit_hash: String) -> Ve
         .collect()
 }
 
+fn extract_urls(toml_files: Vec<Value>) -> HashMap<String, Vec<String>> {
+    toml_files
+        .into_iter()
+        .filter_map(|toml_file| {
+            let title = toml_file["title"]
+                .as_str()
+                .expect("Missing or invalid title")
+                .to_string();
+            
+            let mut repos: Vec<String> = vec![];
+            match toml_file.get("repo").and_then(Value::as_array) {
+                Some(value) => {
+                    for repo in value {
+                        if let Some(url) = repo.get("url").and_then(Value::as_str) {
+                            repos.push(url.to_string())
+                        }
+                    }
+                }
+                None => return None,
+            }
+            Some((title, repos))
+        })
+        .collect()
+}
+
 #[tokio::main]
 async fn main() -> Result<(), reqwest::Error> {
     // // Specify the URL you want to make a GET request to
@@ -123,14 +148,14 @@ async fn main() -> Result<(), reqwest::Error> {
     let new_commit_hash = "cd4d6d144e66bd8092433818de0d0f7780c4dfd5".to_string();
     let changed_files = get_changed_files_raw(old_commit_hash, new_commit_hash);
 
-    let parsed_toml: Value = toml::from_str(&changed_files[0]).expect("Failed to parse TOML");
+    let parsed_tomls: Vec<Value> = changed_files
+        .into_iter()
+        .map(|file| toml::from_str(&file).expect("Failed to parse TOML"))
+        .collect();
 
-    println!(
-        "file: {}",
-        parsed_toml["title"]
-            .as_str()
-            .expect("Missing or invalid title")
-    );
+    let extracted_urls = extract_urls(parsed_tomls);
+
+    println!("{:?}", extracted_urls.get("0chain").unwrap()[4]);
 
     Ok(())
 }
