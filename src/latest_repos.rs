@@ -1,19 +1,23 @@
-use serde::Deserialize;
-use std::{borrow::BorrowMut, collections::HashMap};
-// URL we scrap
-// https://github.com/machinefi/Bike-Sharing-DePIN-Webinar
-// URL we have to GET request
-// https://raw.githubusercontent.com/machinefi/Bike-Sharing-DePIN-Webinar/main/README.md
-use git2::{Diff, Oid, Repository};
-use toml::Value;
+// We check all the files that changed between twos commits on the ecosystems repo (https://github.com/electric-capital/crypto-ecosystems)
+// Then we parse the toml files that corresponds to projects that had changes between these two commits
+// We save a json containing all the projects that changed and the github urls that corresponds
 
-use anyhow::{anyhow, Result};
-use reqwest;
+use std::collections::HashMap;
+use std::fs::File;
+
+use anyhow::Result;
+use git2::{Oid, Repository};
+use std::io::{BufWriter, Write};
+use toml::Value;
 
 // GitHub repository information
 const OWNER: &str = "electric-capital";
 const REPO: &str = "crypto-ecosystems";
 
+/// URL we scrap
+/// https://github.com/machinefi/Bike-Sharing-DePIN-Webinar
+/// URL we have to GET request
+/// https://raw.githubusercontent.com/machinefi/Bike-Sharing-DePIN-Webinar/main/README.md
 fn repo_url_to_readme_url(repo_url: &str) -> Vec<String> {
     let last_part = repo_url
         .strip_prefix("https://github")
@@ -25,20 +29,7 @@ fn repo_url_to_readme_url(repo_url: &str) -> Vec<String> {
     ]
 }
 
-async fn fetch_readme(url: &str) -> Result<String> {
-    // Make the GET request
-    let response = reqwest::get(url).await?;
-
-    // Check if the request was successful (status code 2xx)
-    if response.status().is_success() {
-        // Read the response body as a string
-        return Ok(response.text().await?);
-    } else {
-        return Err(anyhow!(response.status()));
-    }
-}
-
-fn get_changed_files_raw(old_commit_hash: String, new_commit_hash: String) -> Vec<String> {
+fn get_changed_files_raw(old_commit_hash: String, new_commit_hash: String) -> Result<Vec<String>> {
     // Create a temporary directory for the cloned repository
     let temp_dir = tempfile::tempdir().expect("Failed to create temporary directory");
 
@@ -72,27 +63,32 @@ fn get_changed_files_raw(old_commit_hash: String, new_commit_hash: String) -> Ve
     };
 
     // Get the diff between the two commits
-    let diff = match repo.diff_tree_to_tree(
-        Some(&old_commit.tree().unwrap()),
-        Some(&new_commit.tree().unwrap()),
-        None,
-    ) {
-        Ok(diff) => diff,
-        Err(e) => panic!("failed to get diff: {}", e),
-    };
+    let diff =
+        match repo.diff_tree_to_tree(Some(&old_commit.tree()?), Some(&new_commit.tree()?), None) {
+            Ok(diff) => diff,
+            Err(e) => panic!("failed to get diff: {}", e),
+        };
 
     let changed_files: Vec<Vec<u8>> = diff
         .deltas()
         .filter_map(|delta| delta.new_file().path())
         .filter_map(|path| {
-            if path.extension().unwrap() != "toml" {
+            if path.extension()? != "toml" {
                 return None;
             }
             if !path.starts_with("data/ecosystems") {
                 return None;
             }
-            let binding = match new_commit.tree().unwrap().get_path(path) {
-                Ok(value) => value.to_object(&repo).unwrap().into_blob().unwrap(),
+            let binding = match new_commit
+                .tree()
+                .expect("Couldn't get the tree of the new commit")
+                .get_path(path)
+            {
+                Ok(value) => value
+                    .to_object(&repo)
+                    .expect("Couldn't convert tree to object")
+                    .into_blob()
+                    .expect("Couldn't convert object to blob"),
                 Err(_) => return None,
             };
 
@@ -101,10 +97,10 @@ fn get_changed_files_raw(old_commit_hash: String, new_commit_hash: String) -> Ve
         })
         .collect();
 
-    changed_files
+    Ok(changed_files
         .into_iter()
         .map(|x| String::from_utf8_lossy(&x).to_string())
-        .collect()
+        .collect())
 }
 
 fn extract_urls(toml_files: Vec<Value>) -> HashMap<String, Vec<String>> {
@@ -115,13 +111,15 @@ fn extract_urls(toml_files: Vec<Value>) -> HashMap<String, Vec<String>> {
                 .as_str()
                 .expect("Missing or invalid title")
                 .to_string();
-            
+
             let mut repos: Vec<String> = vec![];
             match toml_file.get("repo").and_then(Value::as_array) {
                 Some(value) => {
                     for repo in value {
                         if let Some(url) = repo.get("url").and_then(Value::as_str) {
-                            repos.push(url.to_string())
+                            if url.contains("github.com") {
+                                repos.push(url.to_string())
+                            }
                         }
                     }
                 }
@@ -132,30 +130,36 @@ fn extract_urls(toml_files: Vec<Value>) -> HashMap<String, Vec<String>> {
         .collect()
 }
 
+fn get_readme_urls(repo_urls: Vec<String>) -> Vec<String> {
+    repo_urls
+        .into_iter()
+        .map(|repo_url| repo_url_to_readme_url(&repo_url))
+        .flat_map(|readme_pair| readme_pair.into_iter())
+        .collect()
+}
+
 #[tokio::main]
-async fn main() -> Result<(), reqwest::Error> {
-    // // Specify the URL you want to make a GET request to
-    // let url = "https://github.com/machinefi/Bike-Sharing-DePIN-Webinar";
-
-    // // Make the GET request
-    // for e in repo_url_to_readme_url(url) {
-    //     let response = fetch_readme(&e).await.unwrap();
-
-    //     println!("Response: {:?}", response);
-    // }
-
+async fn main() -> Result<()> {
     let old_commit_hash = "e5935b7c2249ff75851e2d31f79a59791e61d753".to_string();
     let new_commit_hash = "cd4d6d144e66bd8092433818de0d0f7780c4dfd5".to_string();
     let changed_files = get_changed_files_raw(old_commit_hash, new_commit_hash);
 
-    let parsed_tomls: Vec<Value> = changed_files
+    let parsed_tomls: Vec<Value> = changed_files?
         .into_iter()
         .map(|file| toml::from_str(&file).expect("Failed to parse TOML"))
         .collect();
 
-    let extracted_urls = extract_urls(parsed_tomls);
+    let extracted_urls_by_project = extract_urls(parsed_tomls);
 
-    println!("{:?}", extracted_urls.get("0chain").unwrap()[4]);
+    let readmes_by_project: HashMap<String, Vec<String>> = extracted_urls_by_project
+        .into_iter()
+        .map(|(project_name, project_urls)| (project_name, get_readme_urls(project_urls)))
+        .collect();
+
+    let file = File::create("dump.json")?;
+    let mut writer = BufWriter::new(file);
+    serde_json::to_writer(&mut writer, &readmes_by_project)?;
+    writer.flush()?;
 
     Ok(())
 }
